@@ -3,6 +3,7 @@ import pandas as pd
 import re
 
 file_name = "./data/산업안전보건법_시행령"
+current_name = "산업안전보건법 시행령"
 
 # ========================
 # 경로/시트 설정
@@ -58,7 +59,7 @@ def build_id(row) -> str:
     h = clean_num_str(row.get("호"))
     if j == "":
         return ""
-    _id = f"산업안전보건법 시행규칙-{j}"
+    _id = f"{current_name}-{j}"
     if a != "":
         _id += f"({a})"
     if h != "":
