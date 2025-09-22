@@ -1,22 +1,9 @@
-"""
-1. (제2조의1  --> 2_1) 이런 형식으로 조 컬럼 바꿔줘
-2. 결과의 미검출은 꼼꼼하게 검토해야해. --> 실수 잡을 수 있어
-3. json 파일하고, 찬호님이 크롤링한 csv 파일 입력으로 해줘야해.
-"""
-
 import re
 import json
 import pandas as pd
 from typing import List, Dict, Any, Tuple, Optional
 import csv
 from collections import defaultdict
-
-file_name = "./data/산업안전보건법_시행령"
-
-# ------------ 경로 ------------
-JSON_PATH = f"{file_name}_큰틀.json"  # 큰틀
-CSV_PATH = f"{file_name}_data.csv"  # 조만들어가있는
-OUT_CSV_PATH = f"{file_name}_항_호.csv"  # output
 
 # ------------ CSV 로딩 보강(인코딩/구분자 자동 시도) ------------
 CANDIDATE_ENCODINGS = ["utf-8", "utf-8-sig", "cp949", "euc-kr", "latin1"]
@@ -269,13 +256,21 @@ def match_with_cursor(article: Dict[str, Any], link_text: str, cursor: Dict[str,
     return None, None, "미검출", cursor
 
 
-# ------------ 메인 실행 ------------
-def main():
+# ------------ 메인 실행 로직을 함수로 전환 ------------
+def process_law_file(file_name: str):
+    """하나의 법령 파일 세트(json, csv)를 처리하여 결과 csv를 저장하는 함수"""
+    print(f"\n▶️ '{file_name}' 파일 처리 시작...")
+
+    # ------------ 경로 설정 (함수 내부로 이동) ------------
+    JSON_PATH = f"./data/고시및예규/{file_name}_큰틀.json"
+    CSV_PATH = f"./data/고시및예규/{file_name}_data.csv"
+    OUT_CSV_PATH = f"./data/고시및예규/{file_name}_항_호.csv"
+
     # 1) JSON 읽기
     nodes = load_law_json(JSON_PATH)
     articles_by_key, base_buckets, cursors = build_article_index(nodes)
     print(
-        f"[INFO] 조(기사) 개수: {len({a['underscore'] for a in articles_by_key.values()})}"
+        f" INFO: 조(기사) 개수: {len({a['underscore'] for a in articles_by_key.values()})}"
     )
 
     # 2) CSV 읽기
@@ -301,12 +296,8 @@ def main():
             continue
 
         key = canonicalize_article_key(raw_article)
-
-        # (1) 우선: 정확 키(underscore 또는 '의' 표기)
         art = articles_by_key.get(key)
 
-        # (2) 숫자만 온 경우: base 후보 중 첫 번째(문서 순서)
-        cursor_key = None
         if art is None and key.isdigit():
             cands = base_buckets.get(key, [])
             art = cands[0] if cands else None
@@ -318,9 +309,8 @@ def main():
             matched_article_num.append("")
             continue
 
-        cursor_key = art["underscore"]  # 조별 커서는 언더스코어 키로 관리
+        cursor_key = art["underscore"]
         cur = cursors.get(cursor_key, {"seg_idx": 0, "offset": 0})
-
         h, o, scope, new_cur = match_with_cursor(art, link_text, cur)
         cursors[cursor_key] = new_cur
 
@@ -338,12 +328,38 @@ def main():
     df_out["매칭조문자열"] = matched_article_num
 
     df_out.to_csv(OUT_CSV_PATH, index=False, encoding="utf-8-sig")
-    print(f"[OK] 저장 완료 → {OUT_CSV_PATH}")
-    print(f"총 행수={len(df_out)}, 미검출={(df_out['매칭범위']=='미검출').sum()}")
+    print(f"✅ [완료] 저장 완료 → {OUT_CSV_PATH}")
+    print(f"     총 행수={len(df_out)}, 미검출={(df_out['매칭범위']=='미검출').sum()}")
 
 
+# ------------ 메인 실행부 (반복문으로 변경) ------------
 if __name__ == "__main__":
-    main()
+    # 🔽 여기에 처리할 파일 이름 목록을 추가하세요. (확장자 제외)
+    file_names_to_process = [
+        "해체공사표준안전작업지침",
+        "추락재해방지표준안전작업지침",
+        # "유해·위험방지계획서 자체심사 및 확인업체 지정대상 건설업체 고시",
+        "보호구 자율안전확인 고시",
+        "건설업 유해·위험방지계획서 중 지도사가 평가·확인 할 수 있는 대상 건설공사의 범위 및 지도사의 요건",
+        "가설공사 표준안전 작업지침",
+        "방호장치 안전인증 고시",
+        # "안전인증·자율안전확인신고의 절차에 관한 고시",
+        # "방호장치 자율안전기준 고시",
+        # "굴착공사 표준안전 작업지침",
+        # "위험기계·기구 안전인증 고시",
+        # "건설업체의 산업재해예방활동 실적 평가기준",
+        # "안전보건교육규정",
+        # "건설공사 안전보건대장의 작성 등에 관한 고시",
+        # "건설업 산업안전보건관리비 계상 및 사용기준",
+        # "산업재해예방시설자금 융자금 지원사업 및 클린사업장 조성지원사업 운영규정"
+    ]
 
+    for name in file_names_to_process:
+        try:
+            process_law_file(name)
+        except FileNotFoundError as e:
+            print(f"❌ [오류] '{name}' 처리 중 파일 없음: {e}")
+        except Exception as e:
+            print(f"❌ [오류] '{name}' 처리 중 예외 발생: {e}")
 
-# 미검출 데이터 처리 후 xlsx로 저장
+    print("\n🎉 모든 파일 처리가 완료되었습니다.")

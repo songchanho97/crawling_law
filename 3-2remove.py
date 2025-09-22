@@ -1,38 +1,56 @@
-# -*- coding: utf-8 -*-
 """
-엑셀의 id/링크텍스트/링크데이터_JSON을 이용해서
-산업안전보건법.json의 각 노드.refs를 채우는 스크립트
+여러 법령 JSON 파일에 대해, 각각에 해당하는 엑셀 파일을 읽어
+JSON 노드의 'refs' 필드를 채우는 스크립트.
 
-- 매칭 기준: 엑셀 id == JSON node['id'] (정확 일치)
-- label: '링크 텍스트' 우선, 비면 '링크 텍스트(원본)'
-- 링크데이터_JSON: 배열/단일객체 모두 허용. 각 아이템에서
-    - ref.id: item['id']
-    - ref.law_title: item.get('law_title') or item.get('text') or id 기반 추정
-    - ref.label: 위의 label
-    - ref.relation: "" (빈 문자열)
-- 매칭 노드 없음 행은 콘솔에 표시 + CSV 기록
+- 처리할 파일 목록을 FILES_TO_PROCESS 리스트에 정의합니다.
+- 각 파일 쌍에 대해 다음을 수행합니다:
+  - 입력: {file_base}_큰틀.json, {file_base}_Ref_labeled_with_json.xlsx
+  - 출력: {file_base}_refs_filled.json
+- 모든 파일 처리 후, 건너뛴 행들의 목록을 통합된 CSV 파일로 저장합니다.
 """
 
 import json
 import pandas as pd
 import re
+import os
 from typing import Any, Dict, List, Optional
 
-file_name = "./data/산업안전보건법_시행령"
+# ====================================
+# 처리할 파일 목록
+# ====================================
+# 여기에 처리할 파일의 기본 경로를 추가하세요.
+# 예: "./data/산업안전보건법_시행령"
+# --------------------------------------------------------------------------
+FILES_TO_PROCESS = [
+    "./data/고시및예규/해체공사표준안전작업지침",
+    "./data/고시및예규/추락재해방지표준안전작업지침",
+    "./data/고시및예규/유해·위험방지계획서 자체심사 및 확인업체 지정대상 건설업체 고시",
+    "./data/고시및예규/보호구 자율안전확인 고시",
+    "./data/고시및예규/건설업 유해·위험방지계획서 중 지도사가 평가·확인 할 수 있는 대상 건설공사의 범위 및 지도사의 요건",
+    "./data/고시및예규/가설공사 표준안전 작업지침",
+    "./data/고시및예규/방호장치 안전인증 고시",
+    # "./data/안전인증·자율안전확인신고의 절차에 관한 고시",
+    # "./data/방호장치 자율안전기준 고시",
+    # "./data/굴착공사 표준안전 작업지침",
+    # "./data/위험기계·기구 안전인증 고시",
+    # "./data/건설업체의 산업재해예방활동 실적 평가기준",
+    # "./data/안전보건교육규정",
+    # "./data/건설공사 안전보건대장의 작성 등에 관한 고시",
+    # "./data/건설업 산업안전보건관리비 계상 및 사용기준",
+    # "./data/산업재해예방시설자금 융자금 지원사업 및 클린사업장 조성지원사업 운영규정",
+]
 
-# ------------------------
-# 경로 설정
-# ------------------------
-JSON_IN_PATH  = f"{file_name}_큰틀.json"
-EXCEL_PATH    = f"{file_name}_Ref_labeled_with_json.xlsx"
-SHEET_NAME    = 0  # 첫 시트 사용 (혹은 'law_final_data_with_hang_ho (1)')
-JSON_OUT_PATH = f"{file_name}_refs_filled.json"
-SKIPPED_NO_NODE_CSV = "rows_skipped_no_node.csv"
-SKIPPED_EMPTY_LABEL_OR_JSON_CSV = "rows_skipped_empty_label_or_json.csv"
+# ====================================
+# 전역 설정
+# ====================================
+# 통합 로그 CSV 파일명
+SKIPPED_NO_NODE_CSV = "all_rows_skipped_no_node.csv"
+SKIPPED_EMPTY_LABEL_OR_JSON_CSV = "all_rows_skipped_empty_label_or_json.csv"
 
-# ------------------------
-# 도우미
-# ------------------------
+
+# ====================================
+# 도우미 함수 (기존과 동일)
+# ====================================
 def ensure_list(obj) -> List:
     if obj is None:
         return []
@@ -40,21 +58,16 @@ def ensure_list(obj) -> List:
         return obj
     return [obj]
 
+
 def pick_label(row: pd.Series) -> Optional[str]:
-    """라벨은 '링크 텍스트' 우선, 없으면 '링크 텍스트(원본)'."""
     val1 = str(row.get("링크 텍스트", "") or "").strip()
     if val1:
         return val1
     val2 = str(row.get("링크 텍스트(원본)", "") or "").strip()
     return val2 if val2 else None
 
+
 def parse_link_json(cell_value: Any) -> List[Dict[str, Any]]:
-    """
-    엑셀의 '링크데이터_JSON' 셀에서 JSON 파싱.
-    - 문자열이면 json.loads
-    - 리스트/딕셔너리도 수용
-    - 실패/빈 값이면 []
-    """
     if cell_value is None:
         return []
     if isinstance(cell_value, (list, dict)):
@@ -63,23 +76,15 @@ def parse_link_json(cell_value: Any) -> List[Dict[str, Any]]:
     if not text:
         return []
     try:
-        parsed = json.loads(text)
-    except Exception:
-        # 셀에 작은 따옴표나 트레일링 콤마 등 있을 때 보정 시도(아주 간단)
-        text2 = text.replace("'", '"')
+        return ensure_list(json.loads(text))
+    except json.JSONDecodeError:
         try:
-            parsed = json.loads(text2)
+            return ensure_list(json.loads(text.replace("'", '"')))
         except Exception:
             return []
-    return ensure_list(parsed)
+
 
 def guess_law_title(item: Dict[str, Any]) -> str:
-    """
-    링크데이터 아이템에서 법명 추정:
-      - item['law_title']가 있으면 그대로
-      - 없으면 item['text'] 사용
-      - 그래도 없으면 item['id']에서 접두부(법명-... 앞부분) 추출
-    """
     lt = str(item.get("law_title", "") or "").strip()
     if lt:
         return lt
@@ -87,30 +92,40 @@ def guess_law_title(item: Dict[str, Any]) -> str:
     if tx:
         return tx
     rid = str(item.get("id", "") or "").strip()
-    # id가 "산업안전보건법-10(1)[2]" 형태라면 '산업안전보건법'을 법명으로 추정
     m = re.match(r"^([^-]+)-", rid)
     return m.group(1) if m else (rid or "")
 
+
 def ref_key_for_dedup(r: Dict[str, Any]) -> tuple:
-    """중복 제거 키: (label, id, law_title)"""
     return (r.get("label", ""), r.get("id", ""), r.get("law_title", ""))
 
-# ------------------------
-# 메인
-# ------------------------
-def main():
-    # 1) JSON 로드
-    with open(JSON_IN_PATH, "r", encoding="utf-8") as f:
+
+# ====================================
+# 핵심 로직 함수
+# ====================================
+def process_file(file_base: str, sheet_name: Any = 0) -> Dict[str, Any]:
+    """단일 파일 쌍(JSON, Excel)을 처리하여 refs를 채우고 통계를 반환합니다."""
+
+    json_in_path = f"{file_base}_큰틀.json"
+    excel_path = f"{file_base}_Ref_labeled_with_json.xlsx"
+    json_out_path = f"{file_base}_refs_filled.json"
+
+    # 1) 입력 파일 존재 확인
+    if not os.path.exists(json_in_path) or not os.path.exists(excel_path):
+        print(f"  [SKIP] 입력 파일(.json 또는 .xlsx)을 찾을 수 없습니다.")
+        return {}
+
+    # 2) JSON 및 Excel 로드
+    with open(json_in_path, "r", encoding="utf-8") as f:
         nodes = json.load(f)
 
-    id_to_idx: Dict[str, int] = {}
-    for i, n in enumerate(nodes):
-        nid = str(n.get("id", "")).strip()
-        if nid:
-            id_to_idx[nid] = i
+    id_to_idx: Dict[str, int] = {
+        str(n.get("id", "")).strip(): i
+        for i, n in enumerate(nodes)
+        if str(n.get("id", "")).strip()
+    }
 
-    # 2) Excel 로드 (dtype=str로 원형 보존)
-    df = pd.read_excel(EXCEL_PATH, sheet_name=SHEET_NAME, dtype=str)
+    df = pd.read_excel(excel_path, sheet_name=sheet_name, dtype=str)
 
     # 3) 처리
     updated_nodes = 0
@@ -121,75 +136,129 @@ def main():
     for r_idx, row in df.iterrows():
         nid = str(row.get("id", "") or "").strip()
         if not nid:
-            continue  # id가 없으면 스킵
+            continue
 
         label = pick_label(row)
         link_json = parse_link_json(row.get("링크데이터_JSON"))
 
         if not label or not link_json:
-            # 라벨/링크데이터가 비어 있으면 통계용 수집 (추후 확인)
-            skipped_empty_rows.append({
-                "row_index": r_idx,
-                "id": nid,
-                "label": label,
-                "링크데이터_JSON": str(row.get("링크데이터_JSON", ""))[:200]
-            })
+            skipped_empty_rows.append(
+                {
+                    "source_file": os.path.basename(file_base),
+                    "row_index": r_idx,
+                    "id": nid,
+                    "label": label,
+                    "json_preview": str(row.get("링크데이터_JSON", ""))[:100],
+                }
+            )
             continue
 
         idx = id_to_idx.get(nid)
         if idx is None:
-            # 매칭 노드 없음 → 기록/출력
-            print(f"[SKIP: no node] row={r_idx}, id={nid}, label={label}")
-            skipped_no_node_rows.append({
-                "row_index": r_idx,
-                "id": nid,
-                "label": label,
-                "링크데이터_JSON": str(row.get("링크데이터_JSON", ""))[:200]
-            })
+            skipped_no_node_rows.append(
+                {
+                    "source_file": os.path.basename(file_base),
+                    "row_index": r_idx,
+                    "id": nid,
+                    "label": label,
+                    "json_preview": str(row.get("링크데이터_JSON", ""))[:100],
+                }
+            )
             continue
 
         node = nodes[idx]
         if "refs" not in node or not isinstance(node["refs"], list):
             node["refs"] = []
 
-        before = set(ref_key_for_dedup(x) for x in node["refs"])
+        before_keys = {ref_key_for_dedup(x) for x in node["refs"]}
 
-        # 한 행의 링크데이터_JSON은 여러 대상일 수 있음(배열)
         to_add = []
         for item in link_json:
             target_id = str(item.get("id", "") or "").strip()
             if not target_id:
                 continue
-            law_title = guess_law_title(item)
+
             ref = {
                 "label": label,
-                "law_title": law_title,
+                "law_title": guess_law_title(item),
                 "id": target_id,
-                "relation": ""
+                "relation": "",
             }
-            if ref_key_for_dedup(ref) not in before:
+
+            ref_key = ref_key_for_dedup(ref)
+            if ref_key not in before_keys:
                 to_add.append(ref)
-                before.add(ref_key_for_dedup(ref))
+                before_keys.add(ref_key)
 
         if to_add:
             node["refs"].extend(to_add)
             updated_nodes += 1
             added_refs += len(to_add)
 
-    # 4) 결과 저장
-    with open(JSON_OUT_PATH, "w", encoding="utf-8") as f:
+    # 4) 결과 저장 및 통계 반환
+    with open(json_out_path, "w", encoding="utf-8") as f:
         json.dump(nodes, f, ensure_ascii=False, indent=2)
 
-    if skipped_no_node_rows:
-        pd.DataFrame(skipped_no_node_rows).to_csv(SKIPPED_NO_NODE_CSV, index=False, encoding="utf-8-sig")
-    if skipped_empty_rows:
-        pd.DataFrame(skipped_empty_rows).to_csv(SKIPPED_EMPTY_LABEL_OR_JSON_CSV, index=False, encoding="utf-8-sig")
+    return {
+        "updated_nodes": updated_nodes,
+        "added_refs": added_refs,
+        "skipped_no_node": skipped_no_node_rows,
+        "skipped_empty": skipped_empty_rows,
+        "out_path": json_out_path,
+    }
 
-    print(f"[OK] refs 채워 저장 → {JSON_OUT_PATH}")
-    print(f"- refs 추가된 노드 수: {updated_nodes}")
-    print(f"- 추가된 refs 총합: {added_refs}")
-    print(f"- 매칭 노드 없음 행: {len(skipped_no_node_rows)} (CSV: {SKIPPED_NO_NODE_CSV if skipped_no_node_rows else '없음'})")
-    print(f"- 빈 라벨/링크데이터 행: {len(skipped_empty_rows)} (CSV: {SKIPPED_EMPTY_LABEL_OR_JSON_CSV if skipped_empty_rows else '없음'})")
+
+# ====================================
+# 실행
+# ====================================
+def main():
+    print("===== Refs 채우기 작업 시작 =====")
+    total_stats = {"updated": 0, "added": 0}
+    all_skipped_no_node = []
+    all_skipped_empty = []
+
+    for file_base in FILES_TO_PROCESS:
+        file_disp_name = os.path.basename(file_base)
+        print(f"\n▶️  '{file_disp_name}' 처리 시작...")
+        try:
+            result = process_file(file_base)
+            if result:
+                total_stats["updated"] += result["updated_nodes"]
+                total_stats["added"] += result["added_refs"]
+                all_skipped_no_node.extend(result["skipped_no_node"])
+                all_skipped_empty.extend(result["skipped_empty"])
+                print(f"  ✅ 저장 완료 → {result['out_path']}")
+                print(
+                    f"    - Refs 추가된 노드: {result['updated_nodes']}, 추가된 refs 총합: {result['added_refs']}"
+                )
+        except Exception as e:
+            print(f"  🚨 처리 중 오류 발생: {e}")
+
+    # 최종 요약 및 통합 CSV 저장
+    print("\n" + "=" * 20 + " 모든 작업 완료 " + "=" * 20)
+    print(f"- 총 refs 추가된 노드 수: {total_stats['updated']}")
+    print(f"- 총 추가된 refs 합계: {total_stats['added']}")
+
+    if all_skipped_no_node:
+        pd.DataFrame(all_skipped_no_node).to_csv(
+            SKIPPED_NO_NODE_CSV, index=False, encoding="utf-8-sig"
+        )
+        print(
+            f"- 매칭 노드 없음 행: {len(all_skipped_no_node)} (CSV 저장: {SKIPPED_NO_NODE_CSV})"
+        )
+    else:
+        print("- 매칭 노드 없음 행: 0")
+
+    if all_skipped_empty:
+        pd.DataFrame(all_skipped_empty).to_csv(
+            SKIPPED_EMPTY_LABEL_OR_JSON_CSV, index=False, encoding="utf-8-sig"
+        )
+        print(
+            f"- 빈 라벨/링크데이터 행: {len(all_skipped_empty)} (CSV 저장: {SKIPPED_EMPTY_LABEL_OR_JSON_CSV})"
+        )
+    else:
+        print("- 빈 라벨/링크데이터 행: 0")
+
 
 if __name__ == "__main__":
     main()

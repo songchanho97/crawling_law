@@ -1,34 +1,56 @@
 # -*- coding: utf-8 -*-
 """
-엑셀의 '링크데이터_JSON' 값들을 가공 없이 그대로 꺼내
-기존 산업안전보건법.json (루트: 리스트) 뒤에 append/extend 하는 스크립트.
+여러 엑셀 파일 각각에 대해, '링크데이터_JSON' 컬럼의 모든 항목을
+기존 JSON 파일 뒤에 그대로 이어붙이는 스크립트.
 
-- id 매칭 안 함
-- 구조/키 변경 안 함 (label 등 추가 X)
-- 중복 제거 안 함
+- 처리할 파일 목록을 FILES_TO_PROCESS 리스트에 정의합니다.
+- 각 파일 쌍에 대해 다음을 수행합니다:
+  - 입력: {file_base}_refs_filled.json, {file_base}_Ref_labeled_with_json.xlsx
+  - 출력: {file_base}_merged.json
+- id 매칭, 구조 변경, 중복 제거 없이 단순히 데이터를 추가합니다.
 """
 
 import json
 import pandas as pd
+import os
 from typing import Any, List, Dict, Optional
 
-file_name = "./data/산업안전보건법_시행령"
+# ====================================
+# 처리할 파일 목록
+# ====================================
+# 여기에 처리할 파일의 기본 경로를 추가하세요.
+# 예: "./data/산업안전보건법_시행령"
+# --------------------------------------------------------------------------
+FILES_TO_PROCESS = [
+    "./data/고시및예규/해체공사표준안전작업지침",
+    "./data/고시및예규/추락재해방지표준안전작업지침",
+    "./data/고시및예규/유해·위험방지계획서 자체심사 및 확인업체 지정대상 건설업체 고시",
+    "./data/고시및예규/보호구 자율안전확인 고시",
+    "./data/고시및예규/건설업 유해·위험방지계획서 중 지도사가 평가·확인 할 수 있는 대상 건설공사의 범위 및 지도사의 요건",
+    "./data/고시및예규/가설공사 표준안전 작업지침",
+    "./data/고시및예규/방호장치 안전인증 고시",
+    # "./data/안전인증·자율안전확인신고의 절차에 관한 고시",
+    # "./data/방호장치 자율안전기준 고시",
+    # "./data/굴착공사 표준안전 작업지침",
+    # "./data/위험기계·기구 안전인증 고시",
+    # "./data/건설업체의 산업재해예방활동 실적 평가기준",
+    # "./data/안전보건교육규정",
+    # "./data/건설공사 안전보건대장의 작성 등에 관한 고시",
+    # "./data/건설업 산업안전보건관리비 계상 및 사용기준",
+    # "./data/산업재해예방시설자금 융자금 지원사업 및 클린사업장 조성지원사업 운영규정",
+]
 
-# -----------------------------
-# 경로 설정
-# -----------------------------
-EXCEL_PATH = f"{file_name}_Ref_labeled_with_json.xlsx"  # 입력 엑셀
-SHEET_NAME = None  # None이면 첫 시트
+# ====================================
+# 전역 설정
+# ====================================
 LINK_JSON_COLS = ["링크데이터_JSON", "링크데이터_json"]  # 후보 컬럼명
-JSON_IN_PATH = f"{file_name}_refs_filled.json"  # 기존 JSON (루트: list)
-JSON_OUT_PATH = f"{file_name}_merged.json"  # 병합 결과 저장
 
 
-# -----------------------------
-# 유틸
-# -----------------------------
+# ====================================
+# 유틸리티 함수 (기존과 동일)
+# ====================================
 def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    """후보 컬럼명 리스트 중 실제 존재하는 첫 번째 컬럼명 반환 (공백/대소문자 무시)."""
+    """후보 컬럼명 리스트 중 실제 존재하는 첫 번째 컬럼명 반환."""
     norm = {c.lower().replace(" ", ""): c for c in df.columns}
     for want in candidates:
         key = want.lower().replace(" ", "")
@@ -38,10 +60,8 @@ def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
 
 
 def safe_json_loads(cell: Any) -> Optional[Any]:
-    """셀의 문자열을 JSON으로 파싱. 비거나 NaN이면 None."""
-    if cell is None:
-        return None
-    if isinstance(cell, float) and pd.isna(cell):
+    """셀의 문자열을 JSON으로 안전하게 파싱."""
+    if pd.isna(cell):
         return None
     if isinstance(cell, (list, dict)):
         return cell
@@ -50,89 +70,102 @@ def safe_json_loads(cell: Any) -> Optional[Any]:
         return None
     try:
         return json.loads(text)
-    except Exception:
-        # 우리 파이프라인이 만든 JSON이면 일반적으로 여기 안 옴.
-        # 그래도 혹시 모를 작은따옴표 등 최소한의 보정 시도
+    except json.JSONDecodeError:
         try:
-            text2 = text.replace("'", '"')
-            return json.loads(text2)
+            return json.loads(text.replace("'", '"'))
         except Exception:
             return None
 
 
 def flatten_link_json(val: Any) -> List[Dict[str, Any]]:
-    """배열이면 원소들 그대로, 단일 객체면 1개 리스트로, 그 외/실패 시 빈 리스트."""
+    """파싱된 JSON을 항상 리스트 형태로 반환."""
     parsed = safe_json_loads(val)
     if parsed is None:
         return []
     if isinstance(parsed, list):
-        # 원소가 dict가 아닐 수도 있지만, "그대로" 요구 → 필터링 없이 넣을 수도 있음.
-        # 다만 기본적으로 dict만 기대되므로 dict만 취하고 싶다면 아래 주석 해제.
-        # return [x for x in parsed if isinstance(x, dict)]
         return parsed
     if isinstance(parsed, dict):
         return [parsed]
     return []
 
 
-# -----------------------------
-# 메인
-# -----------------------------
-def main():
-    # 1) 기존 JSON 로드 (루트가 리스트라고 가정; dict면 리스트로 감쌈)
-    with open(JSON_IN_PATH, "r", encoding="utf-8") as f:
-        base = json.load(f)
-    if isinstance(base, dict):
-        base_list = [base]
-    elif isinstance(base, list):
-        base_list = base
-    else:
-        raise ValueError("기존 JSON의 루트가 list/dict가 아닙니다.")
+# ====================================
+# 핵심 로직 함수
+# ====================================
+def merge_excel_to_json(file_base: str, sheet_name: Any = None) -> Dict[str, Any]:
+    """단일 파일 쌍을 처리하여 JSON을 병합하고 통계를 반환합니다."""
 
+    excel_path = f"{file_base}_Ref_labeled_with_json.xlsx"
+    json_in_path = f"{file_base}_refs_filled.json"
+    json_out_path = f"{file_base}_merged.json"
+
+    # 1) 입력 파일 존재 확인
+    if not os.path.exists(json_in_path) or not os.path.exists(excel_path):
+        print(f"  [SKIP] 입력 파일(.json 또는 .xlsx)을 찾을 수 없습니다.")
+        return {}
+
+    # 2) 기존 JSON 로드
+    with open(json_in_path, "r", encoding="utf-8") as f:
+        base = json.load(f)
+
+    base_list = base if isinstance(base, list) else [base]
     original_len = len(base_list)
 
-    # 2) 엑셀 로드
-    xls = pd.ExcelFile(EXCEL_PATH)
-    sheet = (
-        SHEET_NAME
-        if (SHEET_NAME and SHEET_NAME in xls.sheet_names)
-        else xls.sheet_names[0]
-    )
-    df = pd.read_excel(xls, sheet_name=sheet, dtype=str)
-
-    # 3) 링크데이터_JSON 컬럼 탐색
+    # 3) 엑셀 로드 및 컬럼 탐색
+    df = pd.read_excel(excel_path, sheet_name=0, dtype=str)
     link_col = find_column(df, LINK_JSON_COLS)
     if not link_col:
-        raise ValueError(
-            f"엑셀에 '{LINK_JSON_COLS}' 중 어느 컬럼도 없습니다. 실제 컬럼: {list(df.columns)}"
-        )
+        raise ValueError(f"엑셀에 '{LINK_JSON_COLS}' 중 유효한 컬럼이 없습니다.")
 
-    # 4) 전 행 스캔 → 그대로 수집
+    # 4) 엑셀 데이터 수집 및 병합
     added_items: List[Any] = []
-    total_cells = 0
     nonempty_cells = 0
-
     for _, row in df.iterrows():
-        total_cells += 1
-        raw = row.get(link_col)
-        items = flatten_link_json(raw)
+        items = flatten_link_json(row.get(link_col))
         if items:
             nonempty_cells += 1
-            # "그대로" 이어붙이기
             added_items.extend(items)
 
-    # 5) 기존 리스트 뒤에 그대로 이어붙임 (extend)
     base_list.extend(added_items)
 
-    # 6) 저장
-    with open(JSON_OUT_PATH, "w", encoding="utf-8") as f:
+    # 5) 저장 및 통계 반환
+    with open(json_out_path, "w", encoding="utf-8") as f:
         json.dump(base_list, f, ensure_ascii=False, indent=2)
 
-    print(f"[OK] 병합 완료 → {JSON_OUT_PATH}")
-    print(f"- 기존 JSON 항목수: {original_len}")
-    print(f"- 엑셀 스캔 행수: {total_cells} (비어있지 않은 셀: {nonempty_cells})")
-    print(f"- 추가된 항목수: {len(added_items)}")
-    print(f"- 결과 총 항목수: {len(base_list)}")
+    return {
+        "original_len": original_len,
+        "total_cells": len(df),
+        "nonempty_cells": nonempty_cells,
+        "added_count": len(added_items),
+        "final_len": len(base_list),
+        "out_path": json_out_path,
+    }
+
+
+# ====================================
+# 실행
+# ====================================
+def main():
+    print("===== JSON 병합 작업 시작 =====")
+    total_added_items = 0
+
+    for file_base in FILES_TO_PROCESS:
+        file_disp_name = os.path.basename(file_base)
+        print(f"\n▶️  '{file_disp_name}' 처리 시작...")
+        try:
+            result = merge_excel_to_json(file_base)
+            if result:
+                total_added_items += result["added_count"]
+                print(f"  ✅ 병합 완료 → {result['out_path']}")
+                print(
+                    f"    - 기존 항목: {result['original_len']}, 추가된 항목: {result['added_count']} → 최종: {result['final_len']}"
+                )
+        except Exception as e:
+            print(f"  🚨 처리 중 오류 발생: {e}")
+
+    print("\n" + "=" * 20 + " 모든 작업 완료 " + "=" * 20)
+    print(f"총 {len(FILES_TO_PROCESS)}개 파일 처리 완료.")
+    print(f"모든 파일에서 추가된 총 항목 수: {total_added_items}")
 
 
 if __name__ == "__main__":
